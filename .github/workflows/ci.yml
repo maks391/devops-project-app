@@ -94,7 +94,7 @@ jobs:
 
       # Quality gate: CRITICAL blokira pipeline
       - name: Scan API — CRITICAL gate
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.29.0
         with:
           image-ref: api:scan
           format: table
@@ -103,7 +103,7 @@ jobs:
 
       # HIGH ranjivosti: samo upozorenje + artefakt
       - name: Scan API — HIGH+CRITICAL report
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.29.0
         if: always()
         with:
           image-ref: api:scan
@@ -113,7 +113,7 @@ jobs:
           exit-code: '0'
 
       - name: Scan Worker — CRITICAL gate
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.29.0
         with:
           image-ref: worker:scan
           format: table
@@ -121,7 +121,7 @@ jobs:
           severity: CRITICAL
 
       - name: Scan Worker — HIGH+CRITICAL report
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.29.0
         if: always()
         with:
           image-ref: worker:scan
@@ -131,7 +131,7 @@ jobs:
           exit-code: '0'
 
       - name: Scan Frontend — CRITICAL gate
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.29.0
         with:
           image-ref: frontend:scan
           format: table
@@ -139,7 +139,7 @@ jobs:
           severity: CRITICAL
 
       - name: Scan Frontend — HIGH+CRITICAL report
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.29.0
         if: always()
         with:
           image-ref: frontend:scan
