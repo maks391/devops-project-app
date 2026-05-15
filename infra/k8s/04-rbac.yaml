@@ -1,0 +1,22 @@
+# Minimalni Role — aplikacijski servisi ne trebaju pristup K8s API-ju.
+# Role postoji radi explicitnosti (least-privilege princip).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ticketing-app-role
+  namespace: ticketing
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ticketing-app-rolebinding
+  namespace: ticketing
+subjects:
+  - kind: ServiceAccount
+    name: ticketing-app
+    namespace: ticketing
+roleRef:
+  kind: Role
+  name: ticketing-app-role
+  apiGroup: rbac.authorization.k8s.io

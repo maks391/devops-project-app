@@ -1,0 +1,258 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ─────────────────────────────────────────────
+  # I3: Automatizirani build i test
+  # ─────────────────────────────────────────────
+  build-and-test:
+    name: Build & Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Record build start
+        id: timing
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Build all runtime images
+        run: |
+          docker build --target runtime -t api:ci    -f api/Containerfile    api/
+          docker build --target runtime -t worker:ci -f worker/Containerfile worker/
+          docker build --target runtime -t frontend:ci -f frontend/Containerfile frontend/
+
+      - name: Report build duration
+        run: |
+          END=$(date +%s)
+          ELAPSED=$(( END - ${{ steps.timing.outputs.start }} ))
+          echo "## Build Timing" >> $GITHUB_STEP_SUMMARY
+          echo "- Image build time: **${ELAPSED}s**" >> $GITHUB_STEP_SUMMARY
+
+      - name: Prepare test environment
+        run: cp .env.example .env
+
+      - name: Start stack (dev compose)
+        run: docker compose up -d --build
+
+      - name: Wait for API health
+        run: |
+          echo "Waiting for API to become healthy..."
+          timeout 90 bash -c 'until curl -sf http://localhost:8080/healthz > /dev/null; do sleep 3; done'
+          echo "API healthy."
+
+      - name: Smoke test — health endpoints
+        run: |
+          curl -sf http://localhost:8080/healthz | grep '"status":"ok"'
+          curl -sf http://localhost:3000/healthz  | grep '"status":"ok"'
+          echo "Health endpoints OK" >> $GITHUB_STEP_SUMMARY
+
+      - name: Smoke test — business workflow
+        run: |
+          curl -sf http://localhost:8080/events | python3 -c "import json,sys; d=json.load(sys.stdin); assert len(d)>0"
+          RESP=$(curl -sf -X POST http://localhost:8080/tickets/purchase \
+            -H "Content-Type: application/json" \
+            -d '{"eventId":"evt-1001","customerEmail":"ci@test.example","quantity":1}')
+          echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'orderId' in d"
+          echo "Business workflow OK" >> $GITHUB_STEP_SUMMARY
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs --tail=50
+
+      - name: Stop stack
+        if: always()
+        run: docker compose down -v
+
+  # ─────────────────────────────────────────────
+  # I3 + I4: Sigurnosno skeniranje (quality gate)
+  # ─────────────────────────────────────────────
+  security-scan:
+    name: Security Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build runtime images for scanning
+        run: |
+          docker build --target runtime -t api:scan      -f api/Containerfile      api/
+          docker build --target runtime -t worker:scan   -f worker/Containerfile   worker/
+          docker build --target runtime -t frontend:scan -f frontend/Containerfile frontend/
+
+      # Quality gate: CRITICAL blokira pipeline
+      - name: Scan API — CRITICAL gate
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: api:scan
+          format: table
+          exit-code: '1'
+          severity: CRITICAL
+
+      # HIGH ranjivosti: samo upozorenje + artefakt
+      - name: Scan API — HIGH+CRITICAL report
+        uses: aquasecurity/trivy-action@0.28.0
+        if: always()
+        with:
+          image-ref: api:scan
+          format: json
+          output: trivy-api.json
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+
+      - name: Scan Worker — CRITICAL gate
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: worker:scan
+          format: table
+          exit-code: '1'
+          severity: CRITICAL
+
+      - name: Scan Worker — HIGH+CRITICAL report
+        uses: aquasecurity/trivy-action@0.28.0
+        if: always()
+        with:
+          image-ref: worker:scan
+          format: json
+          output: trivy-worker.json
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+
+      - name: Scan Frontend — CRITICAL gate
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: frontend:scan
+          format: table
+          exit-code: '1'
+          severity: CRITICAL
+
+      - name: Scan Frontend — HIGH+CRITICAL report
+        uses: aquasecurity/trivy-action@0.28.0
+        if: always()
+        with:
+          image-ref: frontend:scan
+          format: json
+          output: trivy-frontend.json
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+
+      - name: Security scan summary
+        if: always()
+        run: |
+          echo "## Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | HIGH | CRITICAL |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|------|----------|" >> $GITHUB_STEP_SUMMARY
+          for svc in api worker frontend; do
+            FILE="trivy-${svc}.json"
+            if [ -f "$FILE" ]; then
+              HIGH=$(python3 -c "
+          import json,sys
+          d=json.load(open('${FILE}'))
+          vulns=[v for r in d.get('Results',[]) for v in (r.get('Vulnerabilities') or []) if v.get('Severity')=='HIGH']
+          print(len(vulns))" 2>/dev/null || echo "?")
+              CRIT=$(python3 -c "
+          import json,sys
+          d=json.load(open('${FILE}'))
+          vulns=[v for r in d.get('Results',[]) for v in (r.get('Vulnerabilities') or []) if v.get('Severity')=='CRITICAL']
+          print(len(vulns))" 2>/dev/null || echo "?")
+              echo "| ${svc} | ${HIGH} | ${CRIT} |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-results-${{ github.run_number }}
+          path: trivy-*.json
+          retention-days: 30
+
+  # ─────────────────────────────────────────────
+  # I3: Build i objava slika u GHCR registru
+  # ─────────────────────────────────────────────
+  publish:
+    name: Publish to GHCR
+    runs-on: ubuntu-latest
+    needs: security-scan
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          echo "sha=${SHA}" >> $GITHUB_OUTPUT
+
+      - name: Build and push API
+        uses: docker/build-push-action@v6
+        with:
+          context: ./api
+          file: ./api/Containerfile
+          target: runtime
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/api:latest
+            ghcr.io/${{ github.repository }}/api:sha-${{ steps.meta.outputs.sha }}
+
+      - name: Build and push Worker
+        uses: docker/build-push-action@v6
+        with:
+          context: ./worker
+          file: ./worker/Containerfile
+          target: runtime
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/worker:latest
+            ghcr.io/${{ github.repository }}/worker:sha-${{ steps.meta.outputs.sha }}
+
+      - name: Build and push Frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Containerfile
+          target: runtime
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/frontend:latest
+            ghcr.io/${{ github.repository }}/frontend:sha-${{ steps.meta.outputs.sha }}
+
+      - name: Publish summary
+        run: |
+          SHA=${{ steps.meta.outputs.sha }}
+          REPO=${{ github.repository }}
+          echo "## Published Images" >> $GITHUB_STEP_SUMMARY
+          echo "| Servis | Tag |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-----|" >> $GITHUB_STEP_SUMMARY
+          for svc in api worker frontend; do
+            echo "| ${svc} | \`ghcr.io/${REPO}/${svc}:sha-${SHA}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| ${svc} | \`ghcr.io/${REPO}/${svc}:latest\` |" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Deployment: ažuriraj image tag u Kubernetes manifestima na sha-${SHA}_" >> $GITHUB_STEP_SUMMARY

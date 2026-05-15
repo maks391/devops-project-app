@@ -1,0 +1,106 @@
+# Osnovna segmentacija prometa — deny-all ingress po defaultu,
+# zatim explicitno dopuštanje potrebnih tokova.
+
+# 1. Zatvori sav ingress promet za namespace po defaultu
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: ticketing
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# 2. Frontend: prima promet samo od Ingress kontrolera
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-frontend
+  namespace: ticketing
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 3000
+          protocol: TCP
+---
+# 3. API: prima promet od frontenda i Ingress kontrolera
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-api
+  namespace: ticketing
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+# 4. PostgreSQL: prima promet samo od API-ja i Workera
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-postgres
+  namespace: ticketing
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api
+        - podSelector:
+            matchLabels:
+              app: worker
+      ports:
+        - port: 5432
+          protocol: TCP
+---
+# 5. Redis: prima promet samo od API-ja i Workera
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-redis
+  namespace: ticketing
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api
+        - podSelector:
+            matchLabels:
+              app: worker
+      ports:
+        - port: 6379
+          protocol: TCP
